@@ -365,7 +365,7 @@ if __name__ == "__main__":
     graph_output_path = "graph_output.json"  # Output JSON file for the structured graph.
 
     # Process documents using tool-based extraction to build the graph JSON.
-    # process_documents(input_json_path, graph_output_path)
+    process_documents(input_json_path, graph_output_path)
 
     # Visualize the resulting graph interactively using Plotly.
     G = visualize_graph_interactive(graph_output_path, output_file="graph_interactive.html")

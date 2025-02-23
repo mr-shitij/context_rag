@@ -4,7 +4,7 @@ from typing import List, Dict, Any
 
 from tqdm import tqdm
 
-from enhance_context_embedding.contextExtractor import ContextualVectorDB
+from enhance_context_embedding_graph.contextExtractor import ContextualVectorDB
 
 
 # Usage in main:
