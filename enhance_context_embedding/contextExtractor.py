@@ -254,8 +254,11 @@ Answer only with the succinct context and nothing else."""
 
             # Insert data
             self.collection.load()
-            self.collection.insert(batch)
-            print(f"Inserted {len(entities)} entities")
+            try:
+                self.collection.insert(batch)
+                print(f"Inserted {len(entities)} entities")
+            finally:
+                self.collection.release()  # Ensure collection is released
         except Exception as e:
             print(f"Error in batch insert: {e}")
             print(f"First entity structure: {entities[0]}")  # Debug info
