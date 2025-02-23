@@ -15,17 +15,12 @@ client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY",
 MODEL_NAME = "claude-3-haiku-20240307"
 
 # ---------------------------------------------------------------------------
-# Define Tools for Extraction with Generalized Prompts
+# Define Tools for Extraction (with prompt caching enabled)
 # ---------------------------------------------------------------------------
 tools_for_entities = [
     {
         "name": "extract_entities",
-        "description": (
-            "Extracts distinct entities using comprehensive guidelines. "
-            "Extract each entity with properties: unique id, canonical name, primary category, "
-            "optional subtypes, attributes (aliases, temporal context, domain context, hierarchical level), "
-            "and evidence (text snippets, positions, confidence)."
-        ),
+        "description": "Extracts distinct entities from the top-level document text.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -34,44 +29,12 @@ tools_for_entities = [
                     "items": {
                         "type": "object",
                         "properties": {
-                            "entity_id": {"type": "string"},
-                            "name": {"type": "string"},
-                            "type": {"type": "string"},
-                            "subtypes": {
-                                "type": "array",
-                                "items": {"type": "string"}
-                            },
-                            "attributes": {
-                                "type": "object",
-                                "properties": {
-                                    "aliases": {
-                                        "type": "array",
-                                        "items": {"type": "string"}
-                                    },
-                                    "temporal_context": {"type": "string"},
-                                    "domain_context": {"type": "string"},
-                                    "hierarchical_level": {"type": "string"}
-                                }
-                            },
-                            "evidence": {
-                                "type": "object",
-                                "properties": {
-                                    "text_snippets": {
-                                        "type": "array",
-                                        "items": {"type": "string"}
-                                    },
-                                    "positions": {
-                                        "type": "array",
-                                        "items": {
-                                            "type": "array",
-                                            "items": {"type": "number"}
-                                        }
-                                    },
-                                    "confidence": {"type": "number"}
-                                }
+                            "entity": {
+                                "type": "string",
+                                "description": "The extracted entity name."
                             }
                         },
-                        "required": ["entity_id", "name", "type", "evidence"]
+                        "required": ["entity"]
                     }
                 }
             },
@@ -83,12 +46,7 @@ tools_for_entities = [
 tools_for_relations = [
     {
         "name": "extract_relations",
-        "description": (
-            "Extracts relationships using comprehensive guidelines. "
-            "For each relation, include a unique relation id, source entity, target entity, primary relationship type, "
-            "optional subtypes, properties (direction, temporal context, strength, certainty), evidence (text snippets, "
-            "positions, inference chain), metadata (domain context, extraction method, confidence)."
-        ),
+        "description": "Extracts relationships from the chunk text.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -97,60 +55,16 @@ tools_for_relations = [
                     "items": {
                         "type": "object",
                         "properties": {
-                            "relation_id": {"type": "string"},
-                            "source_entity": {"type": "string"},
-                            "target_entity": {"type": "string"},
-                            "type": {"type": "string"},
-                            "subtypes": {
-                                "type": "array",
-                                "items": {"type": "string"}
+                            "entity": {
+                                "type": "string",
+                                "description": "The related entity."
                             },
-                            "properties": {
-                                "type": "object",
-                                "properties": {
-                                    "direction": {"type": "string"},
-                                    "temporal_context": {
-                                        "type": "object",
-                                        "properties": {
-                                            "start": {"type": "string"},
-                                            "end": {"type": "string"},
-                                            "duration": {"type": "string"}
-                                        }
-                                    },
-                                    "strength": {"type": "number"},
-                                    "certainty": {"type": "number"}
-                                }
-                            },
-                            "evidence": {
-                                "type": "object",
-                                "properties": {
-                                    "text_snippets": {
-                                        "type": "array",
-                                        "items": {"type": "string"}
-                                    },
-                                    "positions": {
-                                        "type": "array",
-                                        "items": {
-                                            "type": "array",
-                                            "items": {"type": "number"}
-                                        }
-                                    },
-                                    "inference_chain": {
-                                        "type": "array",
-                                        "items": {"type": "string"}
-                                    }
-                                }
-                            },
-                            "metadata": {
-                                "type": "object",
-                                "properties": {
-                                    "domain_context": {"type": "string"},
-                                    "extraction_method": {"type": "string"},
-                                    "confidence": {"type": "number"}
-                                }
+                            "relation": {
+                                "type": "string",
+                                "description": "The type of relationship."
                             }
                         },
-                        "required": ["relation_id", "source_entity", "target_entity", "type", "evidence", "metadata"]
+                        "required": ["entity", "relation"]
                     }
                 }
             },
@@ -161,55 +75,16 @@ tools_for_relations = [
 
 
 # ---------------------------------------------------------------------------
-# Extraction Functions Using Tool Technique with Generalized Prompts
+# Extraction Functions Using Tool Technique (with prompt caching enabled)
 # ---------------------------------------------------------------------------
 def extract_entities_with_tool(doc_content: str) -> list:
     """
-    Uses the extract_entities tool with a generalized prompt to extract distinct entities.
-    Returns a list of entity names (or a simplified version if you wish to ignore additional details).
+    Uses the extract_entities tool to extract distinct entities from the given text.
+    Returns a list of entity names.
     """
-
     prompts = {
-        "cache-prompt": f"""
-        Text:
-            <document>
-            {doc_content}
-            </document>
-        """,
-        "prompt": f"""
-                As an entity extraction specialist, analyze the provided text and identify all meaningful entities.
-                
-                Primary Task:
-                Extract distinct entities that are significant within the context, considering:
-                - Complete and precise entity mentions
-                - Both explicit and implicit entities
-                - Canonical forms and aliases
-                - Hierarchical relationships and domain-specific significance
-                
-                Expected Output Format:
-                {{
-                    "entities": [
-                        {{
-                            "entity_id": "unique_identifier",
-                            "name": "canonical_name",
-                            "type": "primary_category",
-                            "subtypes": ["more_specific_categories"],
-                            "attributes": {{
-                                "aliases": ["alternative_names"],
-                                "temporal_context": "relevant_time_period",
-                                "domain_context": "specific_field",
-                                "hierarchical_level": "position_in_hierarchy"
-                            }},
-                            "evidence": {{
-                                "text_snippets": ["supporting_text"],
-                                "positions": [[start, end]],
-                                "confidence": 0.0
-                            }}
-                        }}
-                    ]
-                }}
-                
-                """
+        'document': f"<document>\n{doc_content}\n</document>",
+        'query': "Extracts entities from text."
     }
     try:
         response = client.messages.create(
@@ -219,8 +94,15 @@ def extract_entities_with_tool(doc_content: str) -> list:
             messages=[{
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": prompts["cache-prompt"], "cache_control": {"type": "ephemeral"}},
-                    {"type": "text", "text": prompts["prompt"]}
+                    {
+                        "type": "text",
+                        "text": prompts['document'],
+                        "cache_control": {"type": "ephemeral"}
+                    },
+                    {
+                        "type": "text",
+                        "text": prompts['query']
+                    }
                 ]
             }],
             extra_headers={"anthropic-beta": "prompt-caching-2024-07-31"}
@@ -230,9 +112,8 @@ def extract_entities_with_tool(doc_content: str) -> list:
             if content.type == "tool_use" and content.name == "extract_entities":
                 json_entities = content.input  # Expected to be a dict with key "entities"
                 break
-        # For simplicity, if you only need the canonical names, you can extract them:
         if json_entities and "entities" in json_entities:
-            return [item["name"] for item in json_entities["entities"]]
+            return [item["entity"] for item in json_entities["entities"]]
         else:
             print("No valid entities extracted.")
             return []
@@ -243,61 +124,14 @@ def extract_entities_with_tool(doc_content: str) -> list:
 
 def extract_relations_with_tool(chunk_text: str, doc_content: str, entities: List[str]) -> list:
     """
-    Uses the extract_relations tool with a generalized prompt to extract relationships.
-    Returns a list of (source_entity, target_entity, relation) tuples.
+    Uses the extract_relations tool to extract relationships from the given text.
+    Returns a list of (entity, relation) tuples.
     """
     prompts = {
-        "cache-prompt": f"""
-        Text:
-            <document>
-            {doc_content}
-            </document>
-        """,
-        "prompt": f"""
-        As a relation extraction specialist, analyze the provided text and identify meaningful relationships between entities.
-        
-        Primary Task:
-        Extract relationships between entities that represent significant connections, considering:
-        - Both explicit and implicit relationships
-        - Directional nature and strength
-        - Temporal aspects and conditional relationships
-        
-        Expected Output Format:
-        {{
-            "relations": [
-                {{
-                    "relation_id": "unique_identifier",
-                    "source_entity": "entity_id_1",
-                    "target_entity": "entity_id_2",
-                    "type": "primary_relationship_type",
-                    "subtypes": ["more_specific_types"],
-                    "properties": {{
-                        "direction": "source_to_target",
-                        "temporal_context": {{"start": "start_time", "end": "end_time", "duration": "time_period"}},
-                        "strength": 0.0,
-                        "certainty": 0.0
-                    }},
-                    "evidence": {{
-                        "text_snippets": ["supporting_text"],
-                        "positions": [[start, end]],
-                        "inference_chain": ["reasoning_steps"]
-                    }},
-                    "metadata": {{
-                        "domain_context": "specific_field",
-                        "extraction_method": "explicit",
-                        "confidence": 0.0
-                    }}
-                }}
-            ]
-        }}
-        Entities:
-        <entities>{entities}</entities>
-
-        Chunk Text:
-        <text>
-        {chunk_text}
-        </text>        
-        """}
+        'document': f"<document>\n{doc_content}\n</document>",
+        'query': f"Extracts relationships from text.\n<text>\n{chunk_text}\n</text>",
+        'entities': f"Extracts entities from text.\n<entities>{entities}\n</entities>",
+    }
     try:
         response = client.messages.create(
             model=MODEL_NAME,
@@ -306,8 +140,19 @@ def extract_relations_with_tool(chunk_text: str, doc_content: str, entities: Lis
             messages=[{
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": prompts["cache-prompt"], "cache_control": {"type": "ephemeral"}},
-                    {"type": "text", "text": prompts["prompt"]}
+                    {
+                        "type": "text",
+                        "text": prompts['document'],
+                        "cache_control": {"type": "ephemeral"}
+                    },
+                    {
+                        "type": "text",
+                        "text": prompts['entities']
+                    },
+                    {
+                        "type": "text",
+                        "text": prompts['query']
+                    }
                 ]
             }],
             extra_headers={"anthropic-beta": "prompt-caching-2024-07-31"}
@@ -318,11 +163,7 @@ def extract_relations_with_tool(chunk_text: str, doc_content: str, entities: Lis
                 json_relations = content.input  # Expected to be a dict with key "relations"
                 break
         if json_relations and "relations" in json_relations:
-            # For simplicity, return a tuple (source_entity, target_entity, relation)
-            # Here, we assume source_entity is the document (or chunk) and target_entity is the related entity.
-            # You may adapt as needed.
-            return [(item["source_entity"], item["target_entity"], item["type"]) for item in
-                    json_relations["relations"]]
+            return [(item["entity"], item["relation"]) for item in json_relations["relations"]]
         else:
             print("No valid relations extracted.")
             return []
@@ -365,12 +206,8 @@ def process_documents(input_json_path: str, output_json_path: str):
                 chunk_out["id"] = chunk["id"]
                 chunk_out["text"] = chunk.get("text", "")
                 print(f"Extracting relations for document {doc['id']} chunk {chunk['id']}...")
-                relations = extract_relations_with_tool(chunk.get("text", ""), doc.get("text", ""),
-                                                        entities=doc_entities)
-                # Here, we simplify the tuple to {"source": doc_id, "target": entity, "relation": relation}
-                # Adjust according to your needs.
-                chunk_out["relations"] = [{"source": doc["id"], "target": target, "relation": rel} for _, target, rel in
-                                          relations]
+                relations = extract_relations_with_tool(chunk.get("text", ""), doc.get("text", ""), entities=doc_entities)
+                chunk_out["relations"] = [{"entity": ent, "relation": rel} for ent, rel in relations]
                 doc_out["chunks"].append(chunk_out)
         output_structure["docs"].append(doc_out)
 
@@ -413,26 +250,31 @@ def visualize_graph_interactive(json_path: str, output_file="graph_interactive.h
             G.add_node(chunk_node, label=f"Chunk {chunk['id']}", type="chunk", text=chunk["text"][:100])
             G.add_edge(doc_id, chunk_node, relation="has_chunk")
             for rel in chunk.get("relations", []):
-                target = rel["target"]
-                if not G.has_node(target):
-                    G.add_node(target, label=target, type="entity")
-                G.add_edge(chunk_node, target, relation=rel["relation"])
+                entity = rel["entity"]
+                if not G.has_node(entity):
+                    G.add_node(entity, label=entity, type="entity")
+                G.add_edge(chunk_node, entity, relation=rel["relation"])
 
+    # Convert NetworkX graph to Plotly scatter traces.
     pos = nx.spring_layout(G, k=0.5, iterations=50)
     edge_x = []
     edge_y = []
+    edge_text = []
     for u, v, data_edge in G.edges(data=True):
         x0, y0 = pos[u]
         x1, y1 = pos[v]
         edge_x.extend([x0, x1, None])
         edge_y.extend([y0, y1, None])
+        edge_text.append(data_edge.get("relation", ""))
     node_x = []
     node_y = []
+    node_text = []
     node_labels = nx.get_node_attributes(G, 'label')
     for node in G.nodes():
         x, y = pos[node]
         node_x.append(x)
         node_y.append(y)
+        node_text.append(f"{node_labels.get(node, node)}\n{G.nodes[node].get('text', '')}")
 
     edge_trace = go.Scatter(
         x=edge_x, y=edge_y,
@@ -456,7 +298,7 @@ def visualize_graph_interactive(json_path: str, output_file="graph_interactive.h
             colorbar=dict(
                 thickness=15,
                 title='Node Connections',
-                xanchor='left'
+                xanchor='left',
             ),
             line_width=2
         )
@@ -523,7 +365,7 @@ if __name__ == "__main__":
     graph_output_path = "graph_output.json"  # Output JSON file for the structured graph.
 
     # Process documents using tool-based extraction to build the graph JSON.
-    process_documents(input_json_path, graph_output_path)
+    # process_documents(input_json_path, graph_output_path)
 
     # Visualize the resulting graph interactively using Plotly.
     G = visualize_graph_interactive(graph_output_path, output_file="graph_interactive.html")
