@@ -1,6 +1,5 @@
 # vector_db.py
 
-import json
 import os
 import threading
 import time
@@ -14,13 +13,120 @@ from pymilvus import Collection, connections, CollectionSchema, FieldSchema, Dat
 from pymilvus.orm import utility
 from tenacity import retry, retry_if_exception_type, wait_exponential, stop_after_attempt
 from tqdm import tqdm
+import json
+import networkx as nx
+import plotly.graph_objects as go
+from neo4j import GraphDatabase
 
 matplotlib.use("Agg")  # for saving static images without a display
 
 
+def visualize_graph_interactive(json_path: str, output_file="graph_interactive.html") -> nx.DiGraph:
+    """
+    Loads the combined JSON structure (produced by process_documents) and creates an interactive Plotly graph.
+    The graph includes:
+      - Document nodes (id = doc id)
+      - Chunk nodes (id = "docID-chunkID") with context stored in metadata
+      - Entity nodes (id = entity name)
+    Edges:
+      - From document to top-level entities (labeled "mentions")
+      - From document to chunks (labeled "has_chunk")
+      - From chunks to related entities (labeled with the extracted relation)
+    The interactive graph is saved as an HTML file.
+    """
+    with open(json_path, 'r', encoding='utf-8') as f:
+        data = json.load(f)
+
+    G = nx.DiGraph()
+
+    for doc in data.get("docs", []):
+        doc_id = doc["id"]
+        G.add_node(doc_id, label=f"Doc {doc_id}", type="doc", text=doc.get("text", "")[:100])
+        for entity in doc.get("entities", []):
+            if not G.has_node(entity):
+                G.add_node(entity, label=entity, type="entity")
+            G.add_edge(doc_id, entity, relation="mentions")
+        for chunk in doc.get("chunks", []):
+            # Use .get("text", "") to handle missing 'text' keys.
+            chunk_text = chunk.get("text", "")
+            chunk_node = f"{doc_id}-{chunk.get('id')}"
+            G.add_node(chunk_node, label=f"Chunk {chunk.get('id')}", type="chunk", text=chunk_text[:100])
+            G.add_edge(doc_id, chunk_node, relation="has_chunk")
+            for rel in chunk.get("relations", []):
+                target = rel.get("target")
+                if target and not G.has_node(target):
+                    G.add_node(target, label=target, type="entity")
+                if target:
+                    G.add_edge(chunk_node, target, relation=rel.get("relation", ""))
+
+    pos = nx.spring_layout(G, k=0.5, iterations=50)
+    edge_x = []
+    edge_y = []
+    for u, v, data_edge in G.edges(data=True):
+        x0, y0 = pos[u]
+        x1, y1 = pos[v]
+        edge_x.extend([x0, x1, None])
+        edge_y.extend([y0, y1, None])
+    node_x = []
+    node_y = []
+    node_labels = nx.get_node_attributes(G, 'label')
+    for node in G.nodes():
+        x, y = pos[node]
+        node_x.append(x)
+        node_y.append(y)
+
+    edge_trace = go.Scatter(
+        x=edge_x, y=edge_y,
+        line=dict(width=1, color='#888'),
+        hoverinfo='none',
+        mode='lines'
+    )
+
+    node_trace = go.Scatter(
+        x=node_x, y=node_y,
+        mode='markers+text',
+        text=[node_labels.get(n, n) for n in G.nodes()],
+        textposition="bottom center",
+        hoverinfo='text',
+        marker=dict(
+            showscale=True,
+            colorscale='YlGnBu',
+            reversescale=True,
+            color=[len(list(G.adj[n])) for n in G.nodes()],
+            size=20,
+            colorbar=dict(
+                thickness=15,
+                title='Node Connections',
+                xanchor='left'
+            ),
+            line_width=2
+        )
+    )
+
+    fig = go.Figure(data=[edge_trace, node_trace],
+                    layout=go.Layout(
+                        title='<br>Interactive Graph Visualization',
+                        showlegend=False,
+                        hovermode='closest',
+                        margin=dict(b=20, l=5, r=5, t=40),
+                        annotations=[dict(
+                            text="",
+                            showarrow=False,
+                            xref="paper", yref="paper"
+                        )],
+                        xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+                        yaxis=dict(showgrid=False, zeroline=False, showticklabels=False)
+                    ))
+
+    fig.write_html(output_file)
+    print(f"Interactive graph saved as {output_file}")
+    return G
+
+
 # ------------------------------ VectorDB Class ---------------------------------
 class ContextualVectorDB:
-    def __init__(self, collection_name: str, voyage_api_key=None, anthropic_api_key=None):
+    def __init__(self, collection_name: str, voyage_api_key=None, anthropic_api_key=None, neo4j_uri=None,
+                 neo4j_user=None, neo4j_password=None):
         """Initialize ContextualVectorDB with API clients, Milvus setup, and extraction components."""
         self.voyage_client = voyageai.Client(api_key=voyage_api_key or os.getenv("VOYAGE_API_KEY"))
         self.anthropic_client = anthropic.Anthropic(api_key=anthropic_api_key or os.getenv("ANTHROPIC_API_KEY"))
@@ -34,6 +140,11 @@ class ContextualVectorDB:
         self.requests_per_minute = 45
         self.last_request_time = 0
         self.request_lock = threading.Lock()
+
+        self.neo4j_uri = voyageai.Client(api_key=neo4j_uri or os.getenv("NEO4J_URI"))
+        self.neo4j_user = anthropic.Anthropic(api_key=neo4j_user or os.getenv("NEO4J_USERNAME"))
+        self.neo4j_password = anthropic.Anthropic(api_key=neo4j_password or os.getenv("NEO4J_PASSWORD"))
+        self.neo4j_driver = GraphDatabase.driver(neo4j_uri, auth=(neo4j_user, neo4j_password))
 
     def _wait_for_rate_limit(self):
         with self.request_lock:
@@ -127,10 +238,6 @@ class ContextualVectorDB:
         stop=stop_after_attempt(3)
     )
     def extract_entities_with_tool(self, doc_content: str) -> list:
-        """
-        Uses the extract_entities tool to extract distinct entities from the given text.
-        Returns a list of entity names.
-        """
         prompts = {
             'document': f"<document>\n{doc_content}\n</document>",
             'query': "Extracts entities from document."
@@ -143,23 +250,23 @@ class ContextualVectorDB:
                 messages=[{
                     "role": "user",
                     "content": [
+                        {"type": "text", "text": prompts['document'], "cache_control": {"type": "ephemeral"}},
                         {"type": "text", "text": prompts['query']},
-                        {"type": "text", "text": prompts['document']},
                     ]
                 }],
+                extra_headers={"anthropic-beta": "prompt-caching-2024-07-31"}
             )
             json_entities = None
             for content in response.content:
                 if content.type == "tool_use" and content.name == "extract_entities":
-                    json_entities = content.input  # Expected to be a dict with key "entities"
+                    json_entities = content.input  # This might be a string.
                     break
 
-            # If json_entities is a string, parse it into a dict.
             if isinstance(json_entities, str):
                 try:
                     json_entities = json.loads(json_entities)
                 except Exception as parse_error:
-                    print("Failed to parse json_entities:", parse_error)
+                    print("Error parsing json_entities:", parse_error)
                     return []
 
             if json_entities and "entities" in json_entities:
@@ -449,6 +556,113 @@ class ContextualVectorDB:
             self._insert_batch(entities)
         print("Successfully loaded chunks into Milvus")
 
+    def store_graph_in_neo4j(self, json_path: str):
+        """
+        Loads the combined JSON structure and creates a NetworkX graph with detailed metadata.
+        Then stores the graph into a Neo4j database.
+
+        Expected JSON structure:
+        {
+          "docs": [
+            {
+              "id": "document_id",
+              "text": "Full document text...",
+              "entities": [ "Entity1", "Entity2", ... ],
+              "chunks": [
+                {
+                  "id": "chunk_id",
+                  "text": "Chunk text...",
+                  "context": "Generated context...",
+                  "relations": [
+                      { "source": "document_id", "target": "Entity1", "relation": "mentions" },
+                      ...
+                  ]
+                },
+                ...
+              ]
+            },
+            ...
+          ]
+        }
+
+        Each node is created/merged with properties:
+          - id: the unique identifier (for docs, chunks, or entities)
+          - label: a display label
+          - type: node type ("doc", "chunk", "entity")
+          - text: a snippet or the full text (as needed)
+          - additional metadata (e.g. full_text for documents, context for chunks, etc.)
+
+        Relationships are created with a "relation" property.
+        """
+        # Load JSON data.
+        with open(json_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+
+        # Build the NetworkX graph with proper metadata.
+        G = nx.DiGraph()
+        for doc in data.get("docs", []):
+            doc_id = doc["id"]
+            # Create document node with additional metadata.
+            G.add_node(doc_id,
+                       label=f"Doc {doc_id}",
+                       type="doc",
+                       text=doc["text"][:100],
+                       full_text=doc["text"],
+                       entities=doc.get("entities", []))
+            # Connect document to its entities.
+            for entity in doc.get("entities", []):
+                if not G.has_node(entity):
+                    G.add_node(entity, label=entity, type="entity")
+                G.add_edge(doc_id, entity, relation="mentions")
+            # Process chunks.
+            for chunk in doc.get("chunks", []):
+                chunk_id = chunk.get("id")
+                chunk_text = chunk.get("text", "")
+                chunk_context = chunk.get("context", "")
+                chunk_node = f"{doc_id}-{chunk_id}"
+                # Create chunk node with context metadata.
+                G.add_node(chunk_node,
+                           label=f"Chunk {chunk_id}",
+                           type="chunk",
+                           text=chunk_text[:100],
+                           context=chunk_context)
+                G.add_edge(doc_id, chunk_node, relation="has_chunk")
+                for rel in chunk.get("relations", []):
+                    target = rel.get("target")
+                    relation_label = rel.get("relation", "")
+                    if target:
+                        if not G.has_node(target):
+                            G.add_node(target, label=target, type="entity")
+                        G.add_edge(chunk_node, target, relation=relation_label)
+
+        # Now, store the graph into Neo4j.
+        with self.neo4j_driver.session() as session:
+            # Create or merge nodes.
+            for node, props in G.nodes(data=True):
+                # We'll store all properties as node attributes.
+                session.run(
+                    """
+                    MERGE (n:Node {id: $id})
+                    SET n += $props
+                    """,
+                    id=node,
+                    props=props
+                )
+            # Create or merge relationships.
+            for u, v, props in G.edges(data=True):
+                session.run(
+                    """
+                    MATCH (a:Node {id: $u}), (b:Node {id: $v})
+                    MERGE (a)-[r:RELATION {relation: $relation}]->(b)
+                    """,
+                    u=u,
+                    v=v,
+                    relation=props.get("relation", "")
+                )
+        self.neo4j_driver.close()
+        print("Graph successfully stored in Neo4j.")
+        return G
+
 
 if __name__ == "__main__":
     db = ContextualVectorDB("pdf_embeddings")
@@ -467,10 +681,12 @@ if __name__ == "__main__":
                 print(f"Processing {hash_dir}...")
                 db.load_data(json_data, json_path, parallel_threads=4)
 
-    results = db.search("shitij", k=5)
+    results = db.search("Shitij Agrawal", k=5)
     for result in results:
         print(f"Similarity: {result['similarity']:.3f}")
         print(f"Group ID: {result['metadata']['group_id']}")
         print(f"Chunk ID: {result['metadata']['chunk_id']}")
         print(f"Content: {result['metadata']['original_content'][:200]}...")
         print(f"Context: {result['metadata']['context']}\n")
+
+    # visualize_graph_interactive("../DOCS/processed/8d666fe5820af800c8778b001c37c7169b5edb617f42158ca8dcad28fc8d59aa/grouped_pages.json")
