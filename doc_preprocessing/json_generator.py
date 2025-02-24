@@ -58,7 +58,7 @@ def process_pages_to_json(hash_directory):
                 # Add to chunks
                 chunk_obj = {
                     "id": idx + 1,
-                    "text": page_content
+                    "content": page_content
                 }
                 group_obj["chunks"].append(chunk_obj)
 

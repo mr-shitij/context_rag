@@ -48,7 +48,7 @@ def visualize_graph_interactive(json_path: str, output_file="graph_interactive.h
             G.add_edge(doc_id, entity, relation="mentions")
         for chunk in doc.get("chunks", []):
             # Use .get("text", "") to handle missing 'text' keys.
-            chunk_text = chunk.get("text", "")
+            chunk_text = chunk.get("content", "")
             chunk_node = f"{doc_id}-{chunk.get('id')}"
             G.add_node(chunk_node, label=f"Chunk {chunk.get('id')}", type="chunk", text=chunk_text[:100])
             G.add_edge(doc_id, chunk_node, relation="has_chunk")
@@ -403,21 +403,21 @@ class ContextualVectorDB:
         """
         try:
             # Generate context for this chunk.
-            context = self.generate_context(group['text'], chunk['text'])
+            context = self.generate_context(group['text'], chunk['content'])
             # Update the JSON file with this generated context.
             self._update_json_file(json_path, json_lock, group['id'], chunk['id'], context)
             # Generate embedding using the combined chunk text and context.
-            combined_text = f"{chunk['text']}\n\n{context}"
+            combined_text = f"{chunk['content']}\n\n{context}"
             embedding_result = self.voyage_client.embed([combined_text], model="voyage-2")
             # Extract relations using the generated context (instead of raw chunk text),
             # along with the document text and pre-extracted document entities.
-            relations = self.extract_relations_with_tool(chunk['text'], entities=doc_entities)
+            relations = self.extract_relations_with_tool(chunk['content'], entities=doc_entities)
             return {
                 "id": chunk['id'],
                 "vector": embedding_result.embeddings[0],
                 "group_id": group['id'],
                 "chunk_id": chunk['id'],
-                "content": chunk['text'],
+                "content": chunk['content'],
                 "context": context,
                 "relations": [{"source": group['id'], "target": target, "relation": rel}
                               for target, rel in relations]
@@ -527,6 +527,54 @@ class ContextualVectorDB:
         finally:
             self.collection.release()
 
+    def search_neo4j(self, search_string: str):
+        """
+        Queries the Neo4j graph database for nodes whose 'label' or 'context' contains the search string (case-insensitive),
+        calculates a simple matching score, and prints the node along with its outgoing and incoming relationships.
+
+        The matching score is computed as:
+          score = (1 if label contains search_string else 0) + (1 if context contains search_string else 0)
+
+        Parameters:
+            search_string (str): The string to search for in node labels or context.
+        """
+        query = """
+        MATCH (n:Node)
+        WHERE toLower(n.label) CONTAINS toLower($search)
+           OR (n.context IS NOT NULL AND toLower(n.context) CONTAINS toLower($search))
+        OPTIONAL MATCH (n)-[r]->(m:Node)
+        OPTIONAL MATCH (p:Node)-[r2]->(n)
+        WITH n,
+             collect(DISTINCT {neighbor: m, relation: r.relation}) AS outgoing,
+             collect(DISTINCT {neighbor: p, relation: r2.relation}) AS incoming,
+             CASE WHEN toLower(n.label) CONTAINS toLower($search) THEN 1 ELSE 0 END AS labelMatch,
+             CASE WHEN n.context IS NOT NULL AND toLower(n.context) CONTAINS toLower($search) THEN 1 ELSE 0 END AS contextMatch
+        RETURN n, outgoing, incoming, (labelMatch + contextMatch) AS score
+        """
+        with self.neo4j_driver.session() as session:
+            results = session.run(query, search=search_string)
+            found = False
+            for record in results:
+                found = True
+                node = record["n"]
+                outgoing = record["outgoing"]
+                incoming = record["incoming"]
+                score = record["score"]
+                print(f"Node Found: {node['id']} | Label: {node['label']} | Score: {score}")
+                print("Outgoing Connections:")
+                for out in outgoing:
+                    if out["neighbor"]:
+                        print(
+                            f"  {node['id']} --({out['relation']})--> {out['neighbor']['id']} (Label: {out['neighbor']['label']})")
+                print("Incoming Connections:")
+                for inc in incoming:
+                    if inc["neighbor"]:
+                        print(
+                            f"  {inc['neighbor']['id']} --({inc['relation']})--> {node['id']} (Label: {inc['neighbor']['label']})")
+                print("=" * 50)
+            if not found:
+                print("No matching nodes found.")
+
     def load_existing_json(self, json_data: List[Dict[str, Any]], batch_size: int = 1000):
         print("Loading existing JSON data into Milvus...")
         entities = []
@@ -536,14 +584,14 @@ class ContextualVectorDB:
                     print(f"Skipping chunk {chunk['id']} in group {group['id']} - no context found")
                     continue
                 try:
-                    combined_text = f"{chunk['text']}\n\n{chunk['context']}"
+                    combined_text = f"{chunk['content']}\n\n{chunk['context']}"
                     embedding_result = self.voyage_client.embed([combined_text], model="voyage-2")
                     entities.append({
                         "id": chunk['id'],
                         "vector": embedding_result.embeddings[0],
                         "group_id": group['id'],
                         "chunk_id": chunk['id'],
-                        "content": chunk['text'],
+                        "content": chunk['content'],
                         "context": chunk['context']
                     })
                     if len(entities) >= batch_size:
@@ -606,8 +654,7 @@ class ContextualVectorDB:
             G.add_node(doc_id,
                        label=f"Doc {doc_id}",
                        type="doc",
-                       text=doc["text"][:100],
-                       full_text=doc["text"],
+                       text=doc["text"],
                        entities=doc.get("entities", []))
             # Connect document to its entities.
             for entity in doc.get("entities", []):
@@ -617,15 +664,15 @@ class ContextualVectorDB:
             # Process chunks.
             for chunk in doc.get("chunks", []):
                 chunk_id = chunk.get("id")
-                chunk_text = chunk.get("text", "")
+                chunk_text = chunk.get("content", "")
                 chunk_context = chunk.get("context", "")
                 chunk_node = f"{doc_id}-{chunk_id}"
                 # Create chunk node with context metadata.
                 G.add_node(chunk_node,
                            label=f"Chunk {chunk_id}",
                            type="chunk",
-                           text=chunk_text[:100],
-                           context=chunk_context)
+                           full_content=chunk_text,
+                           full_context=chunk_context)
                 G.add_edge(doc_id, chunk_node, relation="has_chunk")
                 for rel in chunk.get("relations", []):
                     target = rel.get("target")
@@ -665,28 +712,37 @@ class ContextualVectorDB:
 
 
 if __name__ == "__main__":
-    db = ContextualVectorDB("pdf_embeddings")
-    base_dir = "../DOCS"
-    processed_dir = os.path.join(base_dir, "processed")
-    for hash_dir in os.listdir(processed_dir):
-        json_path = os.path.join(processed_dir, hash_dir, "grouped_pages.json")
-        if os.path.exists(json_path):
-            print(f"Processing {hash_dir}...")
-            with open(json_path, 'r', encoding='utf-8') as f:
-                json_data = json.load(f)
-                context_exists = any('context' in chunk for group in json_data for chunk in group['chunks'])
-                if context_exists:
-                    print(f"Skipping {hash_dir} - context already exists")
-                    continue
-                print(f"Processing {hash_dir}...")
-                db.load_data(json_data, json_path, parallel_threads=4)
-
-    results = db.search("Shitij Agrawal", k=5)
-    for result in results:
-        print(f"Similarity: {result['similarity']:.3f}")
-        print(f"Group ID: {result['metadata']['group_id']}")
-        print(f"Chunk ID: {result['metadata']['chunk_id']}")
-        print(f"Content: {result['metadata']['original_content'][:200]}...")
-        print(f"Context: {result['metadata']['context']}\n")
+    db = ContextualVectorDB(
+        collection_name="pdf_embeddings",
+        voyage_api_key="pa-QhwbHHG0NSWxFv1uw-0KReqcnG8_kjCT8K1OOj3sKf8",
+        anthropic_api_key="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",
+        neo4j_uri="neo4j+s://7a45783a.databases.neo4j.io",
+        neo4j_user="neo4j",
+        neo4j_password="UGoQsOUsYYLgdW1VoyTi5QuZEtfU45YIxhFXuNT0gP0"
+    )
+    # base_dir = "../DOCS"
+    # processed_dir = os.path.join(base_dir, "processed")
+    # for hash_dir in os.listdir(processed_dir):
+    #     json_path = os.path.join(processed_dir, hash_dir, "grouped_pages.json")
+    #     if os.path.exists(json_path):
+    #         print(f"Processing {hash_dir}...")
+    #         with open(json_path, 'r', encoding='utf-8') as f:
+    #             json_data = json.load(f)
+    #             context_exists = any('context' in chunk for group in json_data for chunk in group['chunks'])
+    #             if context_exists:
+    #                 print(f"Skipping {hash_dir} - context already exists")
+    #                 continue
+    #             print(f"Processing {hash_dir}...")
+    #             db.load_data(json_data, json_path, parallel_threads=4)
+    #
+    # results = db.search("Shitij Agrawal", k=5)
+    # for result in results:
+    #     print(f"Similarity: {result['similarity']:.3f}")
+    #     print(f"Group ID: {result['metadata']['group_id']}")
+    #     print(f"Chunk ID: {result['metadata']['chunk_id']}")
+    #     print(f"Content: {result['metadata']['original_content'][:200]}...")
+    #     print(f"Context: {result['metadata']['context']}\n")
 
     # visualize_graph_interactive("../DOCS/processed/8d666fe5820af800c8778b001c37c7169b5edb617f42158ca8dcad28fc8d59aa/grouped_pages.json")
+    # db.store_graph_in_neo4j("../DOCS/processed/8d666fe5820af800c8778b001c37c7169b5edb617f42158ca8dcad28fc8d59aa/grouped_pages.json")
+    db.search_neo4j("MCDM")
