@@ -545,7 +545,7 @@ class ContextualVectorDB:
             }
             request_2 = AnnSearchRequest(**search_param_2)
             reqs = [request_1, request_2]
-            ranker = WeightedRanker(0.8, 0.3)
+            ranker = WeightedRanker(0.5, 0.5)
 
             results = self.collection.hybrid_search(
                 reqs=reqs,
