@@ -773,24 +773,24 @@ if __name__ == "__main__":
         collection_name="pdf_embeddings",
         voyage_api_key="pa-QhwbHHG0NSWxFv1uw-0KReqcnG8_kjCT8K1OOj3sKf8",
         anthropic_api_key="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",
-        neo4j_uri="neo4j+s://e9882b6e.databases.neo4j.io",
+        neo4j_uri="neo4j+s://9fb25f55.databases.neo4j.io",
         neo4j_user="neo4j",
-        neo4j_password="hY2rdVwzBb0FDh8nABwsXYwGsjiINdEzY0KINb5h1jI"
+        neo4j_password="wbVkkp6WbC_fruL0qifiCL0eezQP9rpGvEHeoobCkBw"
     )
-    base_dir = "../DOCS"
-    processed_dir = os.path.join(base_dir, "processed")
-    for hash_dir in os.listdir(processed_dir):
-        json_path = os.path.join(processed_dir, hash_dir, "grouped_pages.json")
-        if os.path.exists(json_path):
-            print(f"Processing {hash_dir}...")
-            with open(json_path, 'r', encoding='utf-8') as f:
-                json_data = json.load(f)
-                context_exists = any('context' in chunk for group in json_data for chunk in group['chunks'])
-                if context_exists:
-                    print(f"Skipping {hash_dir} - context already exists")
-                    continue
-                print(f"Processing {hash_dir}...")
-                db.load_data(json_data, json_path, parallel_threads=2)
+    # base_dir = "../DOCS"
+    # processed_dir = os.path.join(base_dir, "processed")
+    # for hash_dir in os.listdir(processed_dir):
+    #     json_path = os.path.join(processed_dir, hash_dir, "grouped_pages.json")
+    #     if os.path.exists(json_path):
+    #         print(f"Processing {hash_dir}...")
+    #         with open(json_path, 'r', encoding='utf-8') as f:
+    #             json_data = json.load(f)
+    #             context_exists = any('context' in chunk for group in json_data for chunk in group['chunks'])
+    #             if context_exists:
+    #                 print(f"Skipping {hash_dir} - context already exists")
+    #                 continue
+    #             print(f"Processing {hash_dir}...")
+    #             db.load_data(json_data, json_path, parallel_threads=2)
 
     # results = db.search("Shitij Agrawal", k=5)
     # for result in results:
@@ -802,5 +802,10 @@ if __name__ == "__main__":
 
     # # visualize_graph_interactive("../DOCS/processed/8d666fe5820af800c8778b001c37c7169b5edb617f42158ca8dcad28fc8d59aa/grouped_pages.json")
     # pprint(db.search_hybrid("MCDM", 5))
-    # db.store_graph_in_neo4j("../DOCS/processed/8d666fe5820af800c8778b001c37c7169b5edb617f42158ca8dcad28fc8d59aa/grouped_pages.json")
+    # db.store_graph_in_neo4j("../DOCS/processed/26f666bf16c513f7b66e2fdfef362f697c253b6ee92f0980a4f9c24bf68e5a67/grouped_pages.json")
+    # db.store_graph_in_neo4j("../DOCS/processed/33b5dc538817b952a55fa2e5a98801a17082eb1944e7a60a7ec657b76728fc18/grouped_pages.json")
+    # db.store_graph_in_neo4j("../DOCS/processed/93afe432ea451f56cc0d04429a79ff19ed6f52294299bd6f407c7854d04437e5/grouped_pages.json")
+    # db.store_graph_in_neo4j("../DOCS/processed/5636d9baac450d39cdba1ccc356e07fec30a68aa8287b094d2a46f33d5c84394/grouped_pages.json")
+    # db.store_graph_in_neo4j("../DOCS/processed/b899c8b081945680d10a3402d830cc9610817bbd59dfb91bd20a39b368a5b388/grouped_pages.json")
+    # db.store_graph_in_neo4j("../DOCS/processed/d3ad679cb2d1f613ff14c09392d3cf7ad79e2dbae7771fbd2a9ba009ba6f09ad/grouped_pages.json")
     # pprint(db.search_neo4j("MCDM"))

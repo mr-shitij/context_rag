@@ -199,6 +199,8 @@ class PDFPreProcessor:
             return False
 
         all_ready = True
+        if len(os.listdir(self.processed_dir)) == 0:
+            all_ready = False
         for hash_dir in self.processed_dir.iterdir():
             if hash_dir.is_dir():
                 json_file = hash_dir / "grouped_pages.json"

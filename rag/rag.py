@@ -1,4 +1,5 @@
 import json
+import os
 from pprint import pprint
 from typing import List, Dict, Any
 
@@ -26,7 +27,7 @@ class RAG:
         self.processed_dir = processed_dir
         self.pre_processor = PDFPreProcessor(raw_dir, processed_dir, group_size=group_size)
         if not self.pre_processor.check_preprocessing():
-            self.pre_processor.process_all()
+            self.pre_processor.process()
 
         self.vector_db = ContextualVectorDB(
             collection_name=collection_name,
@@ -36,6 +37,21 @@ class RAG:
             neo4j_user=neo4j_user,
             neo4j_password=neo4j_password
         )
+
+        if not self._prepare_documents():
+            for hash_dir in os.listdir(processed_dir):
+                json_path = os.path.join(processed_dir, hash_dir, "grouped_pages.json")
+                if os.path.exists(json_path):
+                    print(f"Processing {hash_dir}...")
+                    with open(json_path, 'r', encoding='utf-8') as f:
+                        json_data = json.load(f)
+                        context_exists = any('context' in chunk for group in json_data for chunk in group['chunks'])
+                        if context_exists:
+                            print(f"Skipping {hash_dir} - context already exists")
+                            continue
+                        print(f"Processing {hash_dir}...")
+                        self.vector_db.load_data(json_data, json_path, parallel_threads=2)
+
         self.re_ranker = ReRanker(anthropic_api_key)
 
     def _prepare_documents(self) -> bool:
@@ -52,6 +68,8 @@ class RAG:
             return False
 
         all_ready = True
+        if len(os.listdir(processed_path)) == 0:
+            all_ready = False
         for hash_dir in processed_path.iterdir():
             if hash_dir.is_dir():
                 json_file = hash_dir / "grouped_pages.json"
@@ -99,9 +117,9 @@ if __name__ == "__main__":
         collection_name="pdf_embeddings",
         voyage_api_key="pa-QhwbHHG0NSWxFv1uw-0KReqcnG8_kjCT8K1OOj3sKf8",
         anthropic_api_key="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",
-        neo4j_uri="neo4j+s://e9882b6e.databases.neo4j.io",
+        neo4j_uri="neo4j+s://9fb25f55.databases.neo4j.io",
         neo4j_user="neo4j",
-        neo4j_password="hY2rdVwzBb0FDh8nABwsXYwGsjiINdEzY0KINb5h1jI",
+        neo4j_password="wbVkkp6WbC_fruL0qifiCL0eezQP9rpGvEHeoobCkBw",
         raw_dir="../DOCS/raw",
         processed_dir="../DOCS/processed",
     )
