@@ -25,8 +25,8 @@ class RAG:
         self.raw_dir = raw_dir
         self.processed_dir = processed_dir
         self.pre_processor = PDFPreProcessor(raw_dir, processed_dir, group_size=group_size)
-        if not self._prepare_documents():
-            self.pre_processor.process()
+        if not self.pre_processor.check_preprocessing():
+            self.pre_processor.process_all()
 
         self.vector_db = ContextualVectorDB(
             collection_name=collection_name,
