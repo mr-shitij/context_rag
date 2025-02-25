@@ -1,115 +1,100 @@
-# reranker.py
-
 import os
 import json
 from typing import List, Dict, Any
+
 import anthropic
 
 MODEL_NAME = "claude-3-haiku-20240307"
 
-# Define the tool for re-ranking that returns structured output.
-tools_for_rerank = [
-    {
-        "name": "rerank_candidates",
-        "description": (
-            "Re-ranks candidate chunks based on the provided query. "
-            "Input is a prompt that lists each candidate with its snippet and score. "
-            "Return a structured JSON object with a key 'ranking' whose value is a comma-separated "
-            "list of candidate numbers (1-indexed) in descending order of relevance. "
-            "For example: {\"ranking\": \"2,5,1,3,4\"}"
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "ranking": {
-                    "type": "string",
-                    "description": "Comma-separated candidate indices in order (1-indexed)"
-                }
-            },
-            "required": ["ranking"]
-        }
-    }
-]
-
 
 class ReRanker:
     def __init__(self, anthropic_api_key: str = None, model: str = MODEL_NAME):
+        """
+        Initialize the LLM-based re-ranker using Anthropic's API.
+        """
         self.model = model
         self.client = anthropic.Anthropic(api_key=anthropic_api_key or os.getenv("ANTHROPIC_API_KEY"))
 
-    def _build_rerank_prompt(self, query: str, candidates: List[Dict[str, Any]], source: str) -> str:
+    def _build_rerank_prompt(self, query: str, candidates: list) -> str:
+        """
+        Flattens the candidate structure and builds a re-ranking prompt.
+
+        For each candidate, it extracts:
+          - The candidate ID in the format "docID-chunkID"
+          - The similarity score (from the "similarity" field)
+          - A snippet from either "context" or "original_content" in the candidate metadata.
+
+        The prompt instructs the LLM to return a JSON object with a key "ranking" whose value is a comma-separated list of
+        candidate IDs (docID-chunkID) ordered from most relevant to least.
+        """
         prompt = f"Query: {query}\n\n"
-        prompt += f"Below are candidate chunks from the {source} search:\n"
+        prompt += "Below are candidate chunks retrieved from the vector-graph search. Each candidate is identified by a candidate ID in the format 'docID-chunkID'.\n\n"
         for i, cand in enumerate(candidates):
-            meta = cand.get("metadata", {})
-            snippet = meta.get("context") or meta.get("original_content", "")
-            score = cand.get("similarity", 0) if source == "vector" else cand.get("graph_score", 0)
-            snippet = snippet.strip().replace("\n", " ")[:200]
-            prompt += f"{i + 1}. Score: {score:.3f} - {snippet}\n"
+            metadata = cand.get("metadata", {})
+            group_id = str(metadata.get("group_id", ""))
+            chunk_id = str(metadata.get("chunk_id", ""))
+            candidate_id = f"{group_id}-{chunk_id}"
+            # Use context as the snippet if available; fallback to original_content.
+            snippet = (metadata.get("context") or metadata.get("original_content") or "").replace("\n", " ")[
+                      :200].strip()
+            prompt += f"{i + 1}. ID: {candidate_id} - Snippet: {snippet}\n"
         prompt += (
-            "\nUsing the rerank_candidates tool, re-rank these candidates from most relevant to least relevant. "
-            "Return your answer as a JSON object with a key 'ranking' whose value is a comma-separated list of candidate "
-            "numbers (1-indexed). For example: {\"ranking\": \"2,5,1,3,4\"}"
+            "\nRe-rank these candidates from most relevant to least relevant. "
+            "Return your answer as a JSON object with a key 'ranking' whose value is a comma-separated list of candidate IDs (docID-chunkID). "
+            "For example: {\"ranking\": \"1-2,1-3,2-1,...\"}"
         )
         return prompt
 
-    def _rerank_with_tool(self, query: str, candidates: List[Dict[str, Any]], source: str) -> List[Dict[str, Any]]:
-        prompt = self._build_rerank_prompt(query, candidates, source)
+    def rerank_candidates(self, query: str, candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        Uses the LLM to re-rank a flattened candidate list.
+
+        Expects the LLM to output a JSON string like:
+          {"ranking": "1-2,2-1,1-3,..."}
+        where each candidate ID is in the format "docID-chunkID".
+
+        Returns the candidate list re-ordered according to the LLM output.
+        """
+        prompt = self._build_rerank_prompt(query, candidates)
         try:
             response = self.client.messages.create(
                 model=self.model,
-                max_tokens=256,
-                tools=tools_for_rerank,
+                max_tokens=4096,
+                temperature=0.0,
                 messages=[{"role": "user", "content": prompt}],
-                extra_headers={"anthropic-beta": "prompt-caching-2024-07-31"}
             )
             output_text = response.content[0].text.strip()
-            print(f"LLM re-ranker ({source}) raw output:", output_text)
+            print("LLM re-ranker raw output:", output_text)
         except Exception as e:
             print("Error during LLM re-ranking:", e)
             return candidates
 
         try:
+            # Parse the LLM response. Expected output: {"ranking": "doc1-chunk1,doc2-chunk3,..."}
             output_json = json.loads(output_text)
             ranking_str = output_json.get("ranking", "")
-            indices = [int(i.strip()) for i in ranking_str.split(",") if i.strip().isdigit()]
+            candidate_ids = [cid.strip() for cid in ranking_str.split(",") if cid.strip()]
         except Exception as parse_err:
             print("Error parsing re-ranker output:", parse_err)
-            indices = list(range(1, len(candidates) + 1))
+            candidate_ids = []
 
-        ranked_candidates = [candidates[idx - 1] for idx in indices if 1 <= idx <= len(candidates)]
+        # Build mapping from candidate ID to candidate.
+        candidate_mapping = {}
+        for cand in candidates:
+            metadata = cand.get("metadata", {})
+            group_id = str(metadata.get("group_id", ""))
+            chunk_id = str(metadata.get("chunk_id", ""))
+            cand_id = f"{group_id}-{chunk_id}"
+            candidate_mapping[cand_id] = cand
+
+        ranked_candidates = []
+        for cid in candidate_ids:
+            if cid in candidate_mapping:
+                ranked_candidates.append(candidate_mapping[cid])
+        # Append any candidates not mentioned in the LLM output, preserving their original order.
+        for cand in candidates:
+            metadata = cand.get("metadata", {})
+            cand_id = f"{str(metadata.get('group_id', ''))}-{str(metadata.get('chunk_id', ''))}"
+            if cand_id not in candidate_ids:
+                ranked_candidates.append(cand)
         return ranked_candidates
-
-    def rank_vector_candidates(self, query: str, vector_candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        ranked = self._rerank_with_tool(query, vector_candidates, source="vector")
-        return ranked[:5]
-
-    def rank_graph_candidates(self, query: str, graph_candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        ranked = self._rerank_with_tool(query, graph_candidates, source="graph")
-        return ranked[:5]
-
-    def merge_and_rerank(self,
-                         query: str,
-                         vector_candidates: List[Dict[str, Any]],
-                         graph_candidates: List[Dict[str, Any]],
-                         weights: Dict[str, float] = {"vector": 0.6, "graph": 0.4}) -> List[Dict[str, Any]]:
-        """
-        Re-ranks vector and graph candidates separately using the LLM and then merges the two sets.
-        Each candidate is assumed to have:
-            - "similarity" score for vector candidates,
-            - "graph_score" for graph candidates (or defaults to 0).
-        The final score is computed as:
-            final_score = weights["vector"] * similarity + weights["graph"] * graph_score.
-        Returns the top 10 merged candidates.
-        """
-        top_vector = self.rank_vector_candidates(query, vector_candidates)
-        top_graph = self.rank_graph_candidates(query, graph_candidates)
-        merged = top_vector + top_graph
-
-        for cand in merged:
-            sim = cand.get("similarity", 0)
-            gscore = cand.get("graph_score", 0)
-            cand["final_score"] = weights["vector"] * sim + weights["graph"] * gscore
-
-        merged_sorted = sorted(merged, key=lambda x: x["final_score"], reverse=True)
-        return merged_sorted[:10]

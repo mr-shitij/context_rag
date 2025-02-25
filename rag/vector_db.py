@@ -497,7 +497,6 @@ class ContextualVectorDB:
         with open(json_path, 'w', encoding='utf-8') as f:
             json.dump(combined_json, f, indent=2)
         print(f"Combined graph & context output written to {json_path}")
-        time.sleep(40)
         return combined_json
 
     def _insert_batch(self, entities: List[Dict[str, Any]]):
@@ -524,14 +523,14 @@ class ContextualVectorDB:
             print(f"First entity structure: {entities[0]}")
             raise
 
-    def search(self, query: str, k: int = 20) -> List[Dict[str, Any]]:
+    def search_hybrid(self, query: str, k: int = 20) -> List[Dict[str, Any]]:
         query_vector = self.voyage_client.embed([query], model="voyage-2").embeddings[0]
         self.collection.load()
         try:
             search_param_1 = {
                 "data": [query_vector],
                 "anns_field": "vector",
-                "param": {"metric_type": "IP"},
+                "param": {"metric_type": "IP", "params": {"nprobe": 10}},
                 "limit": k
             }
             request_1 = AnnSearchRequest(**search_param_1)
@@ -541,6 +540,7 @@ class ContextualVectorDB:
                 "anns_field": "sparse",
                 "param": {
                     "metric_type": "BM25",
+                    "params": {"params": {"nprobe": 10}}
                 },
                 "limit": k
             }
@@ -582,8 +582,8 @@ class ContextualVectorDB:
         OPTIONAL MATCH (p:Node)-[r2]->(n)
         WITH n,
              CASE WHEN toLower(n.label) CONTAINS toLower($search) THEN 1 ELSE 0 END AS labelMatch,
-             CASE WHEN n.context IS NOT NULL AND toLower(n.context) CONTAINS toLower($search) THEN 1 ELSE 0 END AS contextMatch
-        RETURN n, (labelMatch + contextMatch) AS score
+             CASE WHEN n.content IS NOT NULL AND toLower(n.content) CONTAINS toLower($search) THEN 1 ELSE 0 END AS contentMatch
+        RETURN n, (labelMatch + contentMatch) AS score
         """
         candidates = []
         with self.neo4j_driver.session() as session:
@@ -602,8 +602,7 @@ class ContextualVectorDB:
                         "type": node.get("type", ""),
                         "doc_id": node.get("doc_id", ""),
                         "chunk_id": node.get("chunk_id", ""),
-                        "original_content": node.get("text", ""),
-                        "context": node.get("context", "")
+                        "content": node.get("text", ""),
                     },
                     "graph_score": record["score"]
                 }
@@ -626,8 +625,12 @@ class ContextualVectorDB:
             for record in results:
                 neighbor = record["neighbor"]
                 relation = record["relation"]
-                # Only add if essential properties exist.
+                # Only include neighbor nodes that have a valid label and at least one non-empty content or context.
                 if not neighbor.get("label"):
+                    continue
+                neighbor_content = neighbor.get("content") or neighbor.get("text", "")
+                neighbor_context = neighbor.get("context", "")
+                if not neighbor_content and not neighbor_context:
                     continue
                 neighbors.append({
                     "metadata": {
@@ -636,27 +639,38 @@ class ContextualVectorDB:
                         "type": neighbor.get("type", ""),
                         "doc_id": neighbor.get("doc_id", ""),
                         "chunk_id": neighbor.get("chunk_id", ""),
-                        "content": neighbor.get("text", ""),
-                        "context": neighbor.get("context", "")
+                        "content": neighbor_content,
                     },
                     "relation": relation
                 })
         return neighbors
 
-    def vector_graph_search(self, query: str, k: int = 5) -> List[Dict[str, Any]]:
+    def vector_graph_search(self, query: str, k: int = 5, threshold: float = 0.7) -> List[Dict[str, Any]]:
         """
-        Performs a vector search using Milvus to retrieve the top candidate chunks.
-        For each candidate, uses its document and chunk IDs to retrieve its neighbor nodes from Neo4j.
-        Returns an enriched list of candidate dictionaries that include a new key "neighbors".
+        Performs a hybrid search (dense vector + BM25) via Milvus and retrieves the top candidate chunks.
+        For each candidate with a similarity (or BM25) score above the given threshold, it retrieves its
+        immediate neighbor nodes from Neo4j. Returns an enriched list of candidate dictionaries that include a
+        "neighbors" key (if applicable).
+
+        Parameters:
+          query (str): The search query.
+          k (int): Number of candidates to retrieve from each search method.
+          threshold (float): Minimum similarity score required to trigger neighbor retrieval.
+
+        Returns:
+          List[Dict[str, Any]]: Enriched candidate dictionaries.
         """
-        vector_candidates = self.search(query, k=k)
+        candidates = self.search_hybrid(query, k=k)
         combined_results = []
-        for cand in vector_candidates:
-            doc_id = cand["metadata"].get("group_id")
-            chunk_id = cand["metadata"].get("chunk_id")
-            if doc_id and chunk_id:
-                neighbors = self.get_neighbors_from_graph(doc_id, chunk_id)
-                cand["neighbors"] = neighbors
+        for cand in candidates:
+            # Use 'similarity' for vector-based candidates and 'bm25_score' for BM25 candidates.
+            sim_score = cand.get("similarity")
+            if sim_score is not None and sim_score >= threshold:
+                doc_id = cand["metadata"].get("group_id")
+                chunk_id = cand["metadata"].get("chunk_id")
+                if doc_id and chunk_id:
+                    neighbors = self.get_neighbors_from_graph(doc_id, chunk_id)
+                    cand["neighbors"] = neighbors
             combined_results.append(cand)
         return combined_results
 
@@ -672,7 +686,6 @@ class ContextualVectorDB:
                     entities.append({
                         "id": chunk['id'],
                         "vector": chunk['vector'],
-                        "sparse": chunk['sparse'],
                         "group_id": group['id'],
                         "chunk_id": chunk['id'],
                         "content": chunk['content'],
@@ -715,15 +728,13 @@ class ContextualVectorDB:
             for chunk in doc.get("chunks", []):
                 chunk_id = chunk.get("id")
                 chunk_text = chunk.get("content", "")
-                chunk_context = chunk.get("context", "")
                 chunk_node = f"{doc_id}-{chunk_id}"
                 G.add_node(chunk_node,
                            label=f"Chunk {chunk_id}",
                            type="chunk",
                            doc_id=doc_id,
                            chunk_id=chunk_id,
-                           content=chunk_text,
-                           context=chunk_context)
+                           content=chunk_text)
                 G.add_edge(doc_id, chunk_node, relation="has_chunk")
                 for rel in chunk.get("relations", []):
                     target = rel.get("target")
@@ -763,34 +774,34 @@ if __name__ == "__main__":
         collection_name="pdf_embeddings",
         voyage_api_key="pa-QhwbHHG0NSWxFv1uw-0KReqcnG8_kjCT8K1OOj3sKf8",
         anthropic_api_key="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",
-        neo4j_uri="neo4j+s://d66b57f8.databases.neo4j.io",
+        neo4j_uri="neo4j+s://e9882b6e.databases.neo4j.io",
         neo4j_user="neo4j",
-        neo4j_password="FbVQusisI5X0jq8IEJjYYrOVmhaelnxdXK9627LGb0o"
+        neo4j_password="hY2rdVwzBb0FDh8nABwsXYwGsjiINdEzY0KINb5h1jI"
     )
-    # base_dir = "../DOCS"
-    # processed_dir = os.path.join(base_dir, "processed")
-    # for hash_dir in os.listdir(processed_dir):
-    #     json_path = os.path.join(processed_dir, hash_dir, "grouped_pages.json")
-    #     if os.path.exists(json_path):
-    #         print(f"Processing {hash_dir}...")
-    #         with open(json_path, 'r', encoding='utf-8') as f:
-    #             json_data = json.load(f)
-    #             context_exists = any('context' in chunk for group in json_data for chunk in group['chunks'])
-    #             if context_exists:
-    #                 print(f"Skipping {hash_dir} - context already exists")
-    #                 continue
-    #             print(f"Processing {hash_dir}...")
-    #             db.load_data(json_data, json_path, parallel_threads=1)
-    #
-    # results = db.search("Shitij Agrawal", k=5)
-    # for result in results:
-    #     print(f"Similarity: {result['similarity']:.3f}")
-    #     print(f"Group ID: {result['metadata']['group_id']}")
-    #     print(f"Chunk ID: {result['metadata']['chunk_id']}")
-    #     print(f"Content: {result['metadata']['original_content'][:200]}...")
-    #     print(f"Context: {result['metadata']['context']}\n")
-    #
+    base_dir = "../DOCS"
+    processed_dir = os.path.join(base_dir, "processed")
+    for hash_dir in os.listdir(processed_dir):
+        json_path = os.path.join(processed_dir, hash_dir, "grouped_pages.json")
+        if os.path.exists(json_path):
+            print(f"Processing {hash_dir}...")
+            with open(json_path, 'r', encoding='utf-8') as f:
+                json_data = json.load(f)
+                context_exists = any('context' in chunk for group in json_data for chunk in group['chunks'])
+                if context_exists:
+                    print(f"Skipping {hash_dir} - context already exists")
+                    continue
+                print(f"Processing {hash_dir}...")
+                db.load_data(json_data, json_path, parallel_threads=2)
+
+    results = db.search("Shitij Agrawal", k=5)
+    for result in results:
+        print(f"Similarity: {result['similarity']:.3f}")
+        print(f"Group ID: {result['metadata']['group_id']}")
+        print(f"Chunk ID: {result['metadata']['chunk_id']}")
+        print(f"Content: {result['metadata']['original_content'][:200]}...")
+        print(f"Context: {result['metadata']['context']}\n")
+
     # # visualize_graph_interactive("../DOCS/processed/8d666fe5820af800c8778b001c37c7169b5edb617f42158ca8dcad28fc8d59aa/grouped_pages.json")
-    # pprint(db.search("RL", 5))
-    db.store_graph_in_neo4j("../DOCS/processed/52d8ca3ac93e88cef9944e1fd03b0e04aec5954495a8250fb2fadf8fa20a4dad/grouped_pages.json")
-    # pprint(db.search_neo4j("RL"))
+    pprint(db.search_hybrid("MCDM", 5))
+    db.store_graph_in_neo4j("../DOCS/processed/8d666fe5820af800c8778b001c37c7169b5edb617f42158ca8dcad28fc8d59aa/grouped_pages.json")
+    pprint(db.search_neo4j("MCDM"))
