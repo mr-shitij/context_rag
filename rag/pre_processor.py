@@ -1,3 +1,5 @@
+# preprocessor.py
+
 import os
 import hashlib
 import shutil
@@ -19,6 +21,9 @@ class PDFPreProcessor:
         self.processed_dir = Path(processed_dir)
         self.group_size = group_size
         self.parser = self.setup_pdf_parser()
+        # File to store processed file hashes so we don't reprocess them.
+        self.hashes_file = self.processed_dir / "processed_hashes.json"
+        self.processed_hashes = self.load_processed_hashes()
 
     def setup_pdf_parser(self) -> LlamaParse:
         """Set up the PDF parser using LlamaParse and environment configurations."""
@@ -27,6 +32,25 @@ class PDFPreProcessor:
             raise ValueError("LLAMA_CLOUD_API_KEY not found in environment variables")
         # Initialize LlamaParse with result_type "markdown"
         return LlamaParse(result_type="markdown", api_key=api_key)
+
+    def load_processed_hashes(self) -> set:
+        """Load the set of processed file hashes from the JSON file if it exists."""
+        if self.hashes_file.exists():
+            try:
+                with open(self.hashes_file, "r", encoding="utf-8") as f:
+                    hashes = json.load(f)
+                return set(hashes)
+            except Exception as e:
+                print(f"Error reading processed hashes: {e}")
+        return set()
+
+    def save_processed_hashes(self):
+        """Save the set of processed file hashes to the JSON file."""
+        try:
+            with open(self.hashes_file, "w", encoding="utf-8") as f:
+                json.dump(list(self.processed_hashes), f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            print(f"Error saving processed hashes: {e}")
 
     def calculate_file_hash(self, file_path: Path) -> str:
         """Calculate SHA‑256 hash of a file for deduplication."""
@@ -56,39 +80,46 @@ class PDFPreProcessor:
         """
         Process all PDF files in the raw directory. For each unique PDF (determined by its hash),
         create a folder under the processed directory, copy the PDF there, and parse it into markdown pages.
-        If a directory for a given file hash already exists, that PDF is considered processed and is skipped.
+        If a directory for a given file hash already exists (or the hash is in our processed_hashes),
+        that PDF is considered processed and is skipped.
         """
         self.processed_dir.mkdir(parents=True, exist_ok=True)
-        hash_map = {}
+        unique_count = 0
         duplicate_count = 0
 
         for file_path in self.raw_dir.glob("**/*.pdf"):
             try:
                 file_hash = self.calculate_file_hash(file_path)
+                # If this hash is already in our set, skip processing.
+                if file_hash in self.processed_hashes:
+                    print(f"Skipping {file_path.name} (hash {file_hash}) - already processed.")
+                    duplicate_count += 1
+                    continue
+
                 hash_dir = self.processed_dir / file_hash
-                # If the hash directory already exists, skip processing this file.
+                # If the folder exists, we consider it processed.
                 if hash_dir.exists():
-                    print(f"Skipping {file_path.name} as it has already been processed (hash: {file_hash}).")
+                    print(f"Skipping {file_path.name} (hash {file_hash}) - directory exists.")
+                    self.processed_hashes.add(file_hash)
+                    duplicate_count += 1
                     continue
 
                 # Process the unique PDF file.
-                hash_map[file_hash] = file_path
+                unique_count += 1
                 hash_dir.mkdir(exist_ok=True)
                 pdf_destination = hash_dir / file_path.name
                 shutil.copy2(file_path, pdf_destination)
                 print(f"Parsing PDF: {file_path.name}")
                 self.parse_pdf(file_path, hash_dir)
                 print(f"Processed: {file_path.name} -> {file_hash}")
+                self.processed_hashes.add(file_hash)
             except Exception as e:
                 print(f"Error processing {file_path}: {str(e)}")
                 continue
 
+        self.save_processed_hashes()
         print(f"\nProcessing complete:")
-        print(f"Unique files processed: {len(hash_map)}")
-        print(f"Duplicates found: {duplicate_count}")
-
-        print(f"\nProcessing complete:")
-        print(f"Unique files: {len(hash_map)}")
+        print(f"Unique files processed: {unique_count}")
         print(f"Duplicates found: {duplicate_count}")
 
     def read_page_content(self, file_path: Path) -> str:
@@ -159,8 +190,8 @@ class PDFPreProcessor:
         """
         Check each hash directory in the processed directory to verify that:
           - A 'grouped_pages.json' file exists.
-          - Each document in the JSON has a 'text' field and a 'chunks' array.
-          - Each chunk in each document contains 'id', 'content', and a non-empty 'context' field.
+          - Each document in the JSON is a dict with a 'text' field and a 'chunks' list.
+          - Each chunk in each document contains 'id', 'content', and a non-empty 'context'.
         Returns True if all directories pass these checks; otherwise, False.
         """
         if not self.processed_dir.exists():
@@ -175,38 +206,39 @@ class PDFPreProcessor:
                     print(f"Missing JSON file in {hash_dir}.")
                     all_ready = False
                     continue
-                with open(json_file, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                    for doc in data:
-                        if "text" not in doc or "chunks" not in doc:
-                            print(f"Document {doc.get('id', 'unknown')} in {hash_dir} is missing required fields.")
+                try:
+                    with open(json_file, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                    if not isinstance(data, list):
+                        print(f"Invalid JSON format in {json_file} (expected list).")
+                        all_ready = False
+                        continue
+                    for group in data:
+                        if not isinstance(group, dict) or "chunks" not in group:
+                            print(f"Group {group} is missing required fields.")
                             all_ready = False
-                        else:
-                            for chunk in doc.get("chunks", []):
-                                if "id" not in chunk or "content" not in chunk:
-                                    print(
-                                        f"Chunk {chunk.get('id', 'unknown')} in document {doc.get('id', 'unknown')} in {hash_dir} is missing required fields.")
-                                    all_ready = False
+                            break
+                        for chunk in group.get("chunks", []):
+                            if not isinstance(chunk, dict) or "id" not in chunk or "content" not in chunk or not chunk.get("context"):
+                                print(f"Chunk {chunk} in group {group.get('id', 'unknown')} is missing required fields or context.")
+                                all_ready = False
+                                break
+                        if not all_ready:
+                            break
+                except Exception as e:
+                    print(f"Error reading JSON from {json_file}: {e}")
+                    all_ready = False
         if all_ready:
             print("Pre-processing check complete. All documents are ready.")
         else:
             print("Some documents require re-processing.")
         return all_ready
 
-    def process_all(self):
-        """Run the complete pre‑processing step for all PDFs."""
-        self.process_pdfs()
-        self.process_all_hash_directories()
-        print("Processing complete!")
-
     def process_all_hash_directories(self):
         """
         Process every hash directory under the processed directory to ensure a valid grouped JSON file exists.
-        For each hash directory, check if 'grouped_pages.json' exists and is in the expected format:
-          - It must be a list of dicts.
-          - Each dict must contain a 'text' field and a 'chunks' list.
-          - Each chunk must have 'id', 'content', and a non-empty 'context'.
-        If any of these checks fail, reprocess that directory.
+        For each hash directory, check if 'grouped_pages.json' exists and is in the expected format.
+        If any check fails, reprocess that directory.
         """
         if not self.processed_dir.exists():
             print(f"Processed directory not found: {self.processed_dir}")
@@ -230,13 +262,12 @@ class PDFPreProcessor:
                         else:
                             for group in data:
                                 if not isinstance(group, dict) or "chunks" not in group:
-                                    print(f"Group {group} is missing required fields.")
+                                    print(f"Group {group} in {hash_dir} is missing required fields.")
                                     reprocess = True
                                     break
                                 for chunk in group.get("chunks", []):
-                                    if not isinstance(chunk, dict) or "id" not in chunk or "content" not in chunk:
-                                        print(
-                                            f"Chunk {chunk} in group {group.get('id', 'unknown')} is missing required fields.")
+                                    if not isinstance(chunk, dict) or "id" not in chunk or "content" not in chunk or not chunk.get("context"):
+                                        print(f"Chunk {chunk} in group {group.get('id', 'unknown')} in {hash_dir} is missing required fields or context.")
                                         reprocess = True
                                         break
                                 if reprocess:
@@ -250,14 +281,21 @@ class PDFPreProcessor:
                     self.process_pages_to_json(hash_dir)
         print("All hash directories processed.")
 
+    def process(self):
+        """Run the complete pre‑processing step for all PDFs."""
+        print("Starting PDF processing...")
+        self.process_pdfs()
+        print("Starting page grouping process...")
+        self.process_all_hash_directories()
+        print("Processing complete!")
 
 def main():
     base_dir = "../DOCS"
     raw_dir = os.path.join(base_dir, "raw")
     processed_dir = os.path.join(base_dir, "processed")
-    preprocessor = PDFPreProcessor(raw_dir, processed_dir, group_size=50)
-    preprocessor.process_all()
 
+    preprocessor = PDFPreProcessor(raw_dir, processed_dir, group_size=50)
+    preprocessor.process()
 
 if __name__ == "__main__":
     main()
