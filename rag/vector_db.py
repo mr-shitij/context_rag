@@ -792,15 +792,15 @@ if __name__ == "__main__":
                 print(f"Processing {hash_dir}...")
                 db.load_data(json_data, json_path, parallel_threads=2)
 
-    results = db.search("Shitij Agrawal", k=5)
-    for result in results:
-        print(f"Similarity: {result['similarity']:.3f}")
-        print(f"Group ID: {result['metadata']['group_id']}")
-        print(f"Chunk ID: {result['metadata']['chunk_id']}")
-        print(f"Content: {result['metadata']['original_content'][:200]}...")
-        print(f"Context: {result['metadata']['context']}\n")
+    # results = db.search("Shitij Agrawal", k=5)
+    # for result in results:
+    #     print(f"Similarity: {result['similarity']:.3f}")
+    #     print(f"Group ID: {result['metadata']['group_id']}")
+    #     print(f"Chunk ID: {result['metadata']['chunk_id']}")
+    #     print(f"Content: {result['metadata']['original_content'][:200]}...")
+    #     print(f"Context: {result['metadata']['context']}\n")
 
     # # visualize_graph_interactive("../DOCS/processed/8d666fe5820af800c8778b001c37c7169b5edb617f42158ca8dcad28fc8d59aa/grouped_pages.json")
-    pprint(db.search_hybrid("MCDM", 5))
-    db.store_graph_in_neo4j("../DOCS/processed/8d666fe5820af800c8778b001c37c7169b5edb617f42158ca8dcad28fc8d59aa/grouped_pages.json")
-    pprint(db.search_neo4j("MCDM"))
+    # pprint(db.search_hybrid("MCDM", 5))
+    # db.store_graph_in_neo4j("../DOCS/processed/8d666fe5820af800c8778b001c37c7169b5edb617f42158ca8dcad28fc8d59aa/grouped_pages.json")
+    # pprint(db.search_neo4j("MCDM"))
