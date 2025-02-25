@@ -218,11 +218,6 @@ class RAG:
 if __name__ == "__main__":
     rag_system = RAG(
         collection_name="pdf_embeddings",
-        voyage_api_key="pa-QhwbHHG0NSWxFv1uw-0KReqcnG8_kjCT8K1OOj3sKf8",
-        anthropic_api_key="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",
-        neo4j_uri="neo4j+s://9fb25f55.databases.neo4j.io",
-        neo4j_user="neo4j",
-        neo4j_password="wbVkkp6WbC_fruL0qifiCL0eezQP9rpGvEHeoobCkBw",
         raw_dir="../DOCS/raw",
         processed_dir="../DOCS/processed",
     )
