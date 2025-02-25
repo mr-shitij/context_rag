@@ -41,7 +41,7 @@ class ReRanker:
         prompt += (
             "\nRe-rank these candidates from most relevant to least relevant. "
             "Return your answer as a JSON object with a key 'ranking' whose value is a comma-separated list of candidate IDs (docID-chunkID). "
-            "For example: {\"ranking\": \"1-2,1-3,2-1,...\"}"
+            "For example: {\"ranking\": \"1-2,1-3,2-1,...\"}. only give the ranking JSON nothing else."
         )
         return prompt
 

@@ -3,6 +3,7 @@ import os
 from pprint import pprint
 from typing import List, Dict, Any
 
+import anthropic
 import matplotlib
 from pathlib import Path
 
@@ -25,9 +26,9 @@ class RAG:
         """
         self.raw_dir = raw_dir
         self.processed_dir = processed_dir
-        self.pre_processor = PDFPreProcessor(raw_dir, processed_dir, group_size=group_size)
-        if not self.pre_processor.check_preprocessing():
-            self.pre_processor.process()
+        # self.pre_processor = PDFPreProcessor(raw_dir, processed_dir, group_size=group_size)
+        # if not self.pre_processor.check_preprocessing():
+        #     self.pre_processor.process()
 
         self.vector_db = ContextualVectorDB(
             collection_name=collection_name,
@@ -38,21 +39,22 @@ class RAG:
             neo4j_password=neo4j_password
         )
 
-        if not self._prepare_documents():
-            for hash_dir in os.listdir(processed_dir):
-                json_path = os.path.join(processed_dir, hash_dir, "grouped_pages.json")
-                if os.path.exists(json_path):
-                    print(f"Processing {hash_dir}...")
-                    with open(json_path, 'r', encoding='utf-8') as f:
-                        json_data = json.load(f)
-                        context_exists = any('context' in chunk for group in json_data for chunk in group['chunks'])
-                        if context_exists:
-                            print(f"Skipping {hash_dir} - context already exists")
-                            continue
-                        print(f"Processing {hash_dir}...")
-                        self.vector_db.load_data(json_data, json_path, parallel_threads=2)
+        # if not self._prepare_documents():
+        #     for hash_dir in os.listdir(processed_dir):
+        #         json_path = os.path.join(processed_dir, hash_dir, "grouped_pages.json")
+        #         if os.path.exists(json_path):
+        #             print(f"Processing {hash_dir}...")
+        #             with open(json_path, 'r', encoding='utf-8') as f:
+        #                 json_data = json.load(f)
+        #                 context_exists = any('context' in chunk for group in json_data for chunk in group['chunks'])
+        #                 if context_exists:
+        #                     print(f"Skipping {hash_dir} - context already exists")
+        #                     continue
+        #                 print(f"Processing {hash_dir}...")
+        #                 self.vector_db.load_data(json_data, json_path, parallel_threads=2)
 
         self.re_ranker = ReRanker(anthropic_api_key)
+        self.anthropic_client = anthropic.Anthropic(api_key=anthropic_api_key)
 
     def _prepare_documents(self) -> bool:
         """
@@ -105,10 +107,111 @@ class RAG:
         Returns the top 10 re-ranked candidate dictionaries.
         """
         candidates = self.vector_db.vector_graph_search(query, k=k)
-        pprint(candidates)
-        print("Candidates are printed")
         reranked = self.re_ranker.rerank_candidates(query, candidates)
+        print("Reranked Candidates: ")
+        pprint(reranked)
         return reranked
+
+    def query_llm(self, query: str) -> str:
+        """
+        Processes a query by first using an LLM call to decide whether retrieval augmentation is needed.
+        If yes, it uses the search function to retrieve relevant documents, incorporates them as references,
+        and then generates a final answer. Otherwise, it generates an answer directly.
+        Returns the final answer as a string.
+        """
+        # Step 1: Decide whether to use RAG.
+        use_rag = self._llm_decide_rag(query)
+        print(f"LLM decision to use RAG: {use_rag}")
+
+        if use_rag:
+            # Step 2: Run the search function to retrieve relevant documents.
+            search_results = self.search(query, k=10)
+            # Step 3: Generate the answer using the retrieved references.
+            final_answer = self._llm_generate_with_references(query, search_results)
+        else:
+            # Generate answer directly without RAG.
+            final_answer = self._llm_generate_without_references(query)
+
+        return final_answer
+
+    def _llm_decide_rag(self, query: str) -> bool:
+        """
+        Uses an LLM to decide if the given query would benefit from retrieval augmentation.
+        """
+        prompts = {
+            'document': f"<query>\n{query}\n</query>",
+            'query': "Determine whether retrieval-augmented generation (RAG) is needed for this query. Respond by using only "
+                     "'yes' or 'no'."
+        }
+        try:
+            response = self.anthropic_client.messages.create(
+                model=MODEL_NAME,
+                max_tokens=10,
+                messages=[{
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompts['document']},
+                        {"type": "text", "text": prompts['query']},
+                    ]
+                }],
+            )
+
+            print(f"LLM decision to use RAG: {response}")
+
+            decision = None
+            for content in response.content:
+                if content.type == "text":
+                    decision = content.text  # This might be a string.
+                    break
+
+            return str(decision).strip().lower().startswith("yes")
+        except Exception as e:
+            print("Error during RAG decision:", e)
+            return True  # Default to using RAG if an error occurs.
+
+    def _llm_generate_with_references(self, query: str, search_results: List[Dict[str, Any]]) -> str:
+        """
+        Uses the LLM to generate an answer to the query using the provided references.
+        """
+        prompts = {
+            'document': f"<search_result>{search_results}</search_result>\n\n<query>\n{query}\n</query>\n\n",
+            'query': "Generate a detailed answer of query using the provided search_result and include citations ie. the doc id and chunk id."
+        }
+        return self._call_llm(prompts)
+
+    def _llm_generate_without_references(self, query: str) -> str:
+        """
+        Uses the LLM to generate an answer to the query without any external references.
+        """
+        prompts = {
+            'document': f"<query>\n{query}\n</query>",
+            'query': "Generate an answer to the query. make the things very friendly."
+        }
+        return self._call_llm(prompts)
+
+    def _call_llm(self, prompts: Dict[str, str]) -> str:
+        """
+        Calls the LLM to process a prompt.
+        """
+        try:
+            response = self.anthropic_client.messages.create(
+                model=MODEL_NAME,
+                max_tokens=4096,
+                messages=[{
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompts['document']},
+                        {"type": "text", "text": prompts['query']},
+                    ]
+                }],
+            )
+            for content in response.content:
+                if content.type == "text":
+                    return str(content.text)
+            return "Error: No valid response received."
+        except Exception as e:
+            print("Error during LLM call:", e)
+            return "Error: Unable to generate an answer."
 
 
 # --------------------------- Example Usage ---------------------------
@@ -124,7 +227,7 @@ if __name__ == "__main__":
         processed_dir="../DOCS/processed",
     )
 
-    final_results = rag_system.search("road optimization", k=10)
-    print("\nMerged and Re-ranked Results:")
-    for res in final_results:
-        pprint(res)
+    query = "tell me about agreement of exim bank"
+    final_answer = rag_system.query_llm(query)
+    print("\nFinal Answer:")
+    print(final_answer)
