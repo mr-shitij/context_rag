@@ -530,7 +530,7 @@ class ContextualVectorDB:
             search_param_1 = {
                 "data": [query_vector],
                 "anns_field": "vector",
-                "param": {"metric_type": "IP", "params": {"nprobe": 10}},
+                "param": {"metric_type": "IP"},
                 "limit": k
             }
             request_1 = AnnSearchRequest(**search_param_1)
@@ -540,7 +540,6 @@ class ContextualVectorDB:
                 "anns_field": "sparse",
                 "param": {
                     "metric_type": "BM25",
-                    "params": {"params": {"nprobe": 10}}
                 },
                 "limit": k
             }
